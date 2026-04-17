@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Purchase Action Extractor</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>Purchase<br/><span>Analysis</span></h1>
+    <p class="subtitle">Upload a log file → select a purchase event → extract all actions leading up to it.</p>
+  </header>
+
+  <div class="steps">
+
+    <!-- Step 1: Upload -->
+    <div class="step active" id="step1">
+      <div class="step-header">
+        <div class="step-num">01</div>
+        <div>
+          <div class="step-title">Upload Log File</div>
+          <div class="step-desc">Supports .json format only</div>
+        </div>
+      </div>
+      <div class="upload-zone" id="uploadZone">
+        <div class="upload-icon">📂</div>
+        <div class="upload-text"><strong>Click to upload</strong> or drag &amp; drop</div>
+        <div class="upload-text" style="margin-top:4px; font-size:12px;">.json log file</div>
+        <input type="file" id="fileInput" accept=".json"/>
+      </div>
+      <div id="uploadStatus" class="hidden" style="margin-top:12px;"></div>
+    </div>
+
+    <!-- Step 2: Select purchase -->
+    <div class="step disabled" id="step2">
+      <div class="step-header">
+        <div class="step-num">02</div>
+        <div>
+          <div class="step-title">Select Purchase Event</div>
+          <div class="step-desc">Choose the purchase event to analyse</div>
+        </div>
+      </div>
+      <div id="fileInfoBar" class="file-info hidden">
+        <span>📄</span><span id="fileInfoText"></span>
+      </div>
+      <div class="purchase-list" id="purchaseList"></div>
+    </div>
+
+    <!-- Step 3: Timeframe -->
+    <div class="step disabled" id="step3">
+      <div class="step-header">
+        <div class="step-num">03</div>
+        <div>
+          <div class="step-title">Set Timeframe</div>
+          <div class="step-desc">How far back before the purchase to look</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:20px;">
+        <div style="font-size:13px; color:var(--muted); margin-bottom:10px; font-weight:600;">LOOK BACK</div>
+        <div class="timeframe-group">
+          <button class="tf-btn selected" data-tf="1_day" onclick="selectTf(this)">
+            1 Day
+            <div class="tf-label">last 24 hours</div>
+          </button>
+          <button class="tf-btn" data-tf="1_week" onclick="selectTf(this)">
+            1 Week
+            <div class="tf-label">last 7 days</div>
+          </button>
+          <button class="tf-btn" data-tf="1_month" onclick="selectTf(this)">
+            1 Month
+            <div class="tf-label">last 30 days</div>
+          </button>
+        </div>
+      </div>
+
+      <button class="extract-btn" id="extractBtn" onclick="doExtract()">
+        ⚡ Extract Past Actions
+      </button>
+    </div>
+
+    <!-- Results -->
+    <div id="resultsSection" class="hidden">
+      <div class="results-box">
+        <div class="results-header">
+          <div>
+            <div class="results-title">Extracted Actions</div>
+            <div id="resultsMeta" style="font-size:12px; color:var(--muted); margin-top:4px; font-family:'JetBrains Mono',monospace;"></div>
+          </div>
+          <div class="result-stat">
+            <span class="stat-pill" id="resultCount">0 actions</span>
+          </div>
+        </div>
+        <div id="fullTable"></div>
+      </div>
+
+      <!-- Gemini Analysis -->
+      <div class="results-box" id="geminiBox" style="margin-top:20px;">
+        <div class="results-header">
+          <div>
+            <div class="results-title">🤖 AI Analysis <span style="font-size:12px; font-weight:400; color:var(--muted);">powered by Gemini</span></div>
+            <div style="font-size:12px; color:var(--muted); margin-top:4px;">Get a human-like explanation and purchase intent score</div>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <button class="analyse-btn" id="analyseBtn" onclick="doAnalyse()">
+            ✦ Analyse Intent
+          </button>
+        </div>
+        <div id="geminiResult" class="hidden" style="margin-top:20px;"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>  
+const API = 'http://127.0.0.1:8000';
+const GEMINI_API_KEY = 'AIzaSyBTJgMNciB8Nuh2O6KLtdbEdMtIDsH8jxo'; // <-- paste your Gemini API key here
+
+// ── Globals ─────────────────────────────────────────────────────
+window.selectedPurchaseIndex = null;
+window.selectedTf = '1_day';
+window.extractedRows = [];
+
+document.addEventListener('DOMContentLoaded', function () {
+
+  const zone      = document.getElementById('uploadZone');
+  const fileInput = document.getElementById('fileInput');
+
+  zone.addEventListener('click', () => fileInput.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+});
+
+// ── Upload ───────────────────────────────────────────────────────
+async function handleFile(file) {
+  const status = document.getElementById('uploadStatus');
+  status.className = 'msg info';
+  status.innerHTML = '<span class="loader"></span> Uploading & scanning for purchase events…';
+  status.classList.remove('hidden');
+
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const res  = await fetch(`${API}/upload`, { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+
+    status.innerHTML = `✅ Found <strong>${data.purchase_events.length}</strong> purchase event(s) in ${data.total_events} total log entries.`;
+    populatePurchaseList(data.purchase_events, file.name, data.total_events);
+    document.getElementById('step2').classList.remove('disabled');
+    document.getElementById('step2').classList.add('active');
+    document.getElementById('step3').classList.remove('disabled');
+    document.getElementById('step3').classList.add('active');
+  } catch (err) {
+    status.className = 'msg error';
+    status.innerHTML = '❌ ' + err.message;
+  }
+}
+
+function populatePurchaseList(events, filename, total) {
+  const list = document.getElementById('purchaseList');
+  const bar  = document.getElementById('fileInfoBar');
+  document.getElementById('fileInfoText').textContent =
+    `${filename} · ${total} events · ${events.length} purchases`;
+  bar.classList.remove('hidden');
+
+  list.innerHTML = '';
+  events.forEach((ev, i) => {
+    const item = document.createElement('label');
+    item.className = 'purchase-item';
+    item.innerHTML = `
+      <input type="radio" name="purchase" value="${ev.row_index}" ${i === 0 ? 'checked' : ''}>
+      <span class="pi-event">${ev.event}</span>
+      <span class="pi-time">${formatTs(ev.timestamp)}</span>
+    `;
+    item.addEventListener('change', () => {
+      document.querySelectorAll('.purchase-item').forEach(el => el.classList.remove('selected'));
+      item.classList.add('selected');
+      window.selectedPurchaseIndex = ev.row_index;
+    });
+    if (i === 0) {
+      item.classList.add('selected');
+      window.selectedPurchaseIndex = ev.row_index;
+    }
+    list.appendChild(item);
+  });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+function formatTs(ts) {
+  if (!ts) return '—';
+  try {
+    const normalized = String(ts).replace(' UTC', 'Z').replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T');
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  } catch { return ts; }
+}
+
+function cellValue(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'object') return JSON.stringify(v);
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) return formatTs(v);
+  return String(v);
+}
+
+// ── Timeframe ────────────────────────────────────────────────────
+function selectTf(btn) {
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+  window.selectedTf = btn.dataset.tf;
+}
+
+// ── Extract ──────────────────────────────────────────────────────
+async function doExtract() {
+  const checked = document.querySelector('input[name="purchase"]:checked');
+  if (checked) window.selectedPurchaseIndex = parseInt(checked.value);
+
+  if (window.selectedPurchaseIndex === null) {
+    alert('Please select a purchase event first.');
+    return;
+  }
+
+  const btn      = document.getElementById('extractBtn');
+  const tableEl  = document.getElementById('fullTable');
+  const sec      = document.getElementById('resultsSection');
+  const geminiR  = document.getElementById('geminiResult');
+
+  btn.disabled    = true;
+  btn.textContent = 'Extracting…';
+  sec.classList.add('hidden');
+  if (geminiR) geminiR.classList.add('hidden');
+
+  try {
+    const res  = await fetch(`${API}/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        purchase_row_index: window.selectedPurchaseIndex,
+        timeframe: window.selectedTf,
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Extraction failed');
+
+    window.extractedRows = data.rows || [];
+    renderResults(data);
+  } catch (err) {
+    sec.classList.remove('hidden');
+    tableEl.innerHTML = `<div class="msg error">❌ ${err.message}</div>`;
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '⚡ Extract Past Actions';
+  }
+}
+
+function renderResults(data) {
+  const sec     = document.getElementById('resultsSection');
+  const count   = document.getElementById('resultCount');
+  const meta    = document.getElementById('resultsMeta');
+  const tableEl = document.getElementById('fullTable');
+
+  sec.classList.remove('hidden');
+  sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const tfLabel = { '1_day': '1 day', '1_week': '1 week', '1_month': '1 month' }[window.selectedTf];
+  meta.textContent  = `Timeframe: ${tfLabel} before purchase`;
+  count.textContent = `${data.count} action${data.count !== 1 ? 's' : ''}`;
+
+  if (data.count === 0) {
+    tableEl.innerHTML = `<div class="msg info">ℹ️ ${data.message}</div>`;
+    return;
+  }
+
+  const rows = data.rows;
+  if (!rows || rows.length === 0) {
+    tableEl.innerHTML = '<div class="msg info">ℹ️ No rows to display.</div>';
+    return;
+  }
+
+  // Collect all unique columns across every row
+  const colSet = new Set();
+  rows.forEach(r => Object.keys(r).forEach(k => colSet.add(k)));
+  const cols = Array.from(colSet);
+
+  let html = `<div class="preview-wrap"><table><thead><tr>`;
+  cols.forEach(c => { html += `<th>${c}</th>`; });
+  html += `</tr></thead><tbody>`;
+
+  rows.forEach((row, i) => {
+    const isLast = i === rows.length - 1;
+    html += `<tr${isLast ? ' class="purchase-row"' : ''}>`;
+    cols.forEach(c => {
+      const display = cellValue(row[c]);
+      const escaped = display
+        .replace(/&/g,  '&amp;')
+        .replace(/"/g,  '&quot;')
+        .replace(/</g,  '&lt;')
+        .replace(/>/g,  '&gt;');
+      html += `<td title="${escaped}">${escaped}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  html += `</tbody></table></div>`;
+  html += `<div class="table-footer">Showing all ${rows.length} row${rows.length !== 1 ? 's' : ''} · last row highlighted = purchase event</div>`;
+  tableEl.innerHTML = html;
+}
+
+// ── Gemini Analysis ──────────────────────────────────────────────
+async function doAnalyse() {
+  if (!window.extractedRows || window.extractedRows.length === 0) {
+    alert('No extracted rows to analyse. Run an extraction first.');
+    return;
+  }
+
+  const btn      = document.getElementById('analyseBtn');
+  const resultEl = document.getElementById('geminiResult');
+
+  btn.disabled    = true;
+  btn.textContent = 'Analysing…';
+  resultEl.classList.remove('hidden');
+  resultEl.innerHTML = '<div class="msg info"><span class="loader"></span> Sending to Gemini…</div>';
+
+  try {
+    const res  = await fetch(`${API}/analyse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: GEMINI_API_KEY, rows: window.extractedRows })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Analysis failed');
+
+    renderGeminiResult(data);
+  } catch (err) {
+    resultEl.innerHTML = `<div class="msg error">❌ ${err.message}</div>`;
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '✦ Analyse Intent';
+  }
+}
+
+function renderGeminiResult(data) {
+  const el         = document.getElementById('geminiResult');
+  const score      = data.intent_score ?? 0;
+  const scoreColor = score >= 70 ? 'var(--accent)' : score >= 40 ? '#fbbf24' : 'var(--danger)';
+  const scoreLabel = score >= 70 ? 'High Intent'   : score >= 40 ? 'Medium Intent' : 'Low Intent';
+
+  
+
+  const signalsHtml = (data.key_events || [])
+  .map(s => `
+    <li class="signal-item">
+      ◆ <strong>${s.event}</strong><br/>
+      <span style="opacity:0.8;">${s.impact}</span>
+    </li>
+  `)
+  .join('');
+
+  
+
+  el.innerHTML = `
+    <div class="gemini-grid">
+      <div class="gemini-score-card">
+        <div class="score-label">Purchase Intent Score</div>
+        <div class="score-ring">
+          <svg viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="40" fill="none" stroke="var(--border)" stroke-width="8"/>
+            <circle cx="50" cy="50" r="40" fill="none" stroke="${scoreColor}" stroke-width="8"
+              stroke-dasharray="${2.513 * score} ${251.3 - 2.513 * score}"
+              stroke-dashoffset="62.8"
+              stroke-linecap="round"
+              style="transition: stroke-dasharray 1s ease;"/>
+          </svg>
+          <div class="score-number">${score}</div>
+        </div>
+        <div class="score-badge" style="color:${scoreColor}; border-color:${scoreColor}40; background:${scoreColor}10;">${scoreLabel}</div>
+      </div>
+      <div class="gemini-detail">
+        <div class="gemini-section">
+          <div class="gemini-section-title">User Journey Narrative</div>
+          <p class="gemini-narrative">${data.narrative || '—'}</p>
+        </div>
+        <div class="gemini-section">
+          <div class="gemini-section-title">Key Signals</div>
+          <ul class="signals-list">${signalsHtml}</ul>
+        </div>
+        <div class="gemini-section">
+          <div class="gemini-section-title">Purchase Motivation</div>
+          <p class="gemini-motivation">${data.motivation_summary || '—'}</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+</script>
+</body>
+</html>
