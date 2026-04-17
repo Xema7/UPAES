@@ -272,7 +272,7 @@ http://127.0.0.1:8000
 ## 📁 Project Structure
 
 ```
-user-action-logger/
+UPIAS/
 │
 ├── extension/
 │   ├── manifest.json
